@@ -1,0 +1,68 @@
+name: Multi-Repo PR Builder
+on:
+  issue_comment:
+    types: [created]
+    
+jobs:
+  parse-comment:
+    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, 'build_prs') }}
+    runs-on: ubuntu-latest
+    outputs:
+      pr_list: ${{ steps.parse.outputs.pr_list }}
+    steps:
+      - name: Extract PR URLs
+        id: parse
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            const prRegex = /https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)/g;
+            const prList = [];
+             
+            let match;
+            while ((match = prRegex.exec(body)) !== null) {
+              prList.push({
+                owner: match[1],
+                repo: match[2],
+                pr: match[3],
+                path: `repos/${match[2]}-${match[3]}`
+              });
+            }
+            
+            core.setOutput('pr_list', JSON.stringify(prList));
+            return prList;
+ 
+  build-repos:
+    needs: parse-comment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Current Repo
+        uses: actions/checkout@v4
+        
+      - name: Setup Build Environment
+        run: mkdir -p repos
+        
+      - name: Process External PRs
+        env:
+          PR_LIST: ${{ needs.parse-comment.outputs.pr_list }}
+          PAT: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          echo "$PR_LIST" | jq -c '.[]' | while read pr; do
+            owner=$(echo "$pr" | jq -r '.owner')
+            repo=$(echo "$pr" | jq -r '.repo')
+            pr_num=$(echo "$pr" | jq -r '.pr')
+            path=$(echo "$pr" | jq -r '.path')
+            
+            echo "Checking out $owner/$repo#PR$pr_num to $path"
+            git -c http.extraheader="Authorization: Bearer $PAT" \
+                clone https://github.com/$owner/$repo.git $path
+            cd $path
+            git fetch origin pull/$pr_num/head:pr-$pr_num
+            git checkout pr-$pr_num
+            cd ../..
+          done
+         
+      - name: Run Integrated Build
+        run: |
+          # 执行自定义构建脚本
+          ./build/ci/run_ci.py
